@@ -1,0 +1,63 @@
+services:
+  proxy:
+    image: mitmproxy/mitmproxy:latest
+    container_name: openhands-proxy
+    command: mitmweb --web-host 0.0.0.0 --listen-host 0.0.0.0 --set block_global=false --set web_password=secret
+    ports:
+      - "127.0.0.1:8081:8081" # Traffic inspection dashboard
+    volumes:
+      - proxy-certs:/home/mitmproxy/.mitmproxy
+    networks:
+      - openhands-net
+
+  openhands:
+    build: .
+    user: "${UID:-1000}:${GID:-1000}"
+    container_name: openhands-cli
+    stdin_open: true # Equivalent to -i
+    tty: true        # Equivalent to -t
+    userns: keep-id:uid=1000,gid=1000 
+    depends_on:
+      - proxy
+    environment:
+      # OpenHands configuration
+      - AGENT_SERVER_IMAGE_REPOSITORY=ghcr.io/openhands/agent-server
+      - AGENT_SERVER_IMAGE_TAG=1.26.0-python
+      - SANDBOX_USER_ID=${UID:-1000}
+      - SANDBOX_VOLUMES=${OPENHANDS_WORKSPACE:-/home/user/projects}:/workspace:rw,z
+      - SANDBOX_NETWORK=openhands-net
+      
+      # Proxy routing for main container
+      - HTTP_PROXY=http://openhands-proxy:8080
+      - HTTPS_PROXY=http://openhands-proxy:8080
+      - NO_PROXY=127.0.0.1,localhost
+      
+      # Proxy routing for sandbox sub-containers
+      - SANDBOX_ENV_HTTP_PROXY=http://openhands-proxy:8080
+      - SANDBOX_ENV_HTTPS_PROXY=http://openhands-proxy:8080
+      - SANDBOX_ENV_NO_PROXY=127.0.0.1,localhost
+      
+      # SSL CA Certificate injection
+      - REQUESTS_CA_BUNDLE=/etc/ssl/certs/mitmproxy-ca-cert.pem
+      - SSL_CERT_FILE=/etc/ssl/certs/mitmproxy-ca-cert.pem
+      - SANDBOX_ENV_REQUESTS_CA_BUNDLE=/etc/ssl/certs/mitmproxy-ca-cert.pem
+      - SANDBOX_ENV_SSL_CERT_FILE=/etc/ssl/certs/mitmproxy-ca-cert.pem
+    volumes:
+      # Mount Podman/Docker socket for sandbox spawning
+      - ${XDG_RUNTIME_DIR}/podman/podman.sock:/var/run/docker.sock:z
+      # Mount configuration directory
+      - ${HOME}/.openhands:/home/user/.openhands:z
+      # Share proxy CA certificate directly from proxy volume
+      - proxy-certs:/etc/ssl/certs:ro,z
+      - ${HOME}/projects/:/home/user/projects:z
+    security_opt:
+      - label=disable
+    networks:
+      - openhands-net
+
+volumes:
+  proxy-certs:
+
+networks:
+  openhands-net:
+    driver: bridge
