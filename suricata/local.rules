@@ -1,0 +1,1 @@
+alert tcp any any -> any any (msg:"OPENHANDS IDS validation request"; flow:established,to_server; content:"X-Suricata-Test|3a 20|openhands-suricata-test"; nocase; sid:1000001; rev:1;)

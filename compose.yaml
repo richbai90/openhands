@@ -1,55 +1,78 @@
 services:
   proxy:
-    image: mitmproxy/mitmproxy:latest
+    image: localhost/openhands-mitmproxy:latest
+    build:
+      context: ./proxy
     container_name: openhands-proxy
-    command: mitmweb --web-host 0.0.0.0 --listen-host 0.0.0.0 --set block_global=false --set web_password=secret
+    command: mitmweb --web-host 0.0.0.0 --listen-host 0.0.0.0 --set block_global=false --set web_password=secret -s /root/inspect.py
     ports:
       - "127.0.0.1:8081:8081" # Traffic inspection dashboard
     volumes:
       - proxy-certs:/home/mitmproxy/.mitmproxy
     networks:
       - openhands-net
+      - proxy-egress
+    environment:
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+
+  evebox:
+    image: jasonish/evebox:0.28.0
+    container_name: openhands-evebox
+    command:
+      - /bin/evebox
+      - server
+      - --host
+      - 0.0.0.0
+      - --no-auth
+      - --no-tls
+      - --disable-geoip
+      - --sqlite
+      - --data-directory
+      - /var/lib/evebox
+      - /var/log/suricata/eve.json
+    ports:
+      - "127.0.0.1:5636:5636"
+    volumes:
+      - ./suricata/logs:/var/log/suricata:ro,z
+      - evebox-data:/var/lib/evebox
+    networks:
+      - observability-net
 
   openhands:
+    image: localhost/openhands-cli:latest
     build: .
-    user: "${UID:-1000}:${GID:-1000}"
     container_name: openhands-cli
     stdin_open: true # Equivalent to -i
     tty: true        # Equivalent to -t
-    userns: keep-id:uid=1000,gid=1000 
+    userns: keep-id
+    working_dir: ${OPENHANDS_WORK_DIR:-/workspace}
     depends_on:
       - proxy
     environment:
-      # OpenHands configuration
-      - AGENT_SERVER_IMAGE_REPOSITORY=ghcr.io/openhands/agent-server
-      - AGENT_SERVER_IMAGE_TAG=1.26.0-python
-      - SANDBOX_USER_ID=${UID:-1000}
-      - SANDBOX_VOLUMES=${OPENHANDS_WORKSPACE:-/home/user/projects}:/workspace:rw,z
-      - SANDBOX_NETWORK=openhands-net
+      - OPENHANDS_WORK_DIR=${OPENHANDS_WORK_DIR:-/workspace}
       
-      # Proxy routing for main container
+      # Proxy routing
       - HTTP_PROXY=http://openhands-proxy:8080
       - HTTPS_PROXY=http://openhands-proxy:8080
       - NO_PROXY=127.0.0.1,localhost
-      
-      # Proxy routing for sandbox sub-containers
-      - SANDBOX_ENV_HTTP_PROXY=http://openhands-proxy:8080
-      - SANDBOX_ENV_HTTPS_PROXY=http://openhands-proxy:8080
-      - SANDBOX_ENV_NO_PROXY=127.0.0.1,localhost
-      
+      - http_proxy=http://openhands-proxy:8080
+      - https_proxy=http://openhands-proxy:8080
+      - no_proxy=127.0.0.1,localhost
+
       # SSL CA Certificate injection
       - REQUESTS_CA_BUNDLE=/etc/ssl/certs/mitmproxy-ca-cert.pem
       - SSL_CERT_FILE=/etc/ssl/certs/mitmproxy-ca-cert.pem
-      - SANDBOX_ENV_REQUESTS_CA_BUNDLE=/etc/ssl/certs/mitmproxy-ca-cert.pem
-      - SANDBOX_ENV_SSL_CERT_FILE=/etc/ssl/certs/mitmproxy-ca-cert.pem
     volumes:
-      # Mount Podman/Docker socket for sandbox spawning
-      - ${XDG_RUNTIME_DIR}/podman/podman.sock:/var/run/docker.sock:z
-      # Mount configuration directory
-      - ${HOME}/.openhands:/home/user/.openhands:z
+      # Copy sanitized settings into ephemeral storage at container startup.
+      - ${OPENHANDS_RUNTIME_CONFIG:-/tmp/openhands-runtime-config-required}:/run/openhands-config:ro,z
+      # Treat auto-loaded skills as immutable trusted input.
+      - ${HOME}/.openhands/cache/skills:/root/.openhands/cache/skills:ro,z
+      # Preserve conversations without exposing host configuration files.
+      - openhands-conversations:/root/.openhands/conversations
       # Share proxy CA certificate directly from proxy volume
       - proxy-certs:/etc/ssl/certs:ro,z
-      - ${HOME}/projects/:/home/user/projects:z
+    tmpfs:
+      - /root/.openhands:rw,mode=0700
     security_opt:
       - label=disable
     networks:
@@ -57,7 +80,15 @@ services:
 
 volumes:
   proxy-certs:
+  evebox-data:
+  openhands-conversations:
 
 networks:
   openhands-net:
+    name: openhands-agent-internal
+    external: true
+  proxy-egress:
     driver: bridge
+  observability-net:
+    name: openhands-observability-internal
+    external: true
